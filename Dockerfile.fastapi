@@ -1,0 +1,12 @@
+FROM python:3.11-slim-bookworm
+
+WORKDIR /opt/airflow
+
+COPY requirements-airflow.txt .
+RUN pip install --no-cache-dir -r requirements-airflow.txt
+
+COPY src ./src
+
+ENV PYTHONPATH=/opt/airflow:$PYTHONPATH
+
+EXPOSE 8000

@@ -1,0 +1,11 @@
+requests
+pandas
+pydantic
+sqlalchemy
+pymysql
+redis
+fastapi
+uvicorn
+python-dotenv
+brotli
+loguru

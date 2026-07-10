@@ -1,0 +1,33 @@
+[tool.poetry]
+name = "taiwan-stock-crawler"
+version = "0.1.0"
+description = "Distributed web crawler system for Taiwanese listed stocks using Airflow, MySQL, and Redis."
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+packages = [{include = "src"}]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.13"
+requests = "^2.31.0"
+pandas = "^2.1.0"
+pydantic = "^2.4.0"
+sqlalchemy = ">=1.4,<2.0"
+pymysql = "^1.1.0"
+redis = "^5.0.0"
+fastapi = "^0.103.0"
+uvicorn = "^0.23.0"
+apache-airflow = {version = "2.11.0", extras = ["celery"]}
+python-dotenv = "^1.0.0"
+brotli = "^1.2.0"
+loguru = "^0.7.3"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.0"
+pytest-cov = "^4.1.0"
+black = "^23.7.0"
+isort = "^5.12.0"
+flake8 = "^6.1.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
