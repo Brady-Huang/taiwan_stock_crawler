@@ -1,261 +1,275 @@
 # 台灣上市股票分散式爬蟲系統
 
-## 專案簡介
+真實資料來源的 Batch Pipeline，每日自動抓取台灣證券交易所（TWSE）股票收盤行情，透過 Apache Airflow CeleryExecutor 實現分散式任務排程，並提供 FastAPI 查詢介面與股價走勢圖表。
 
-此專案旨在建立一個**分散式網路爬蟲系統**，用於定期抓取台灣證券交易所（TWSE）的上市股票交易資料。系統採用 **Apache Airflow** 進行任務編排，**MySQL** 和 **Redis** 分別作為持久化儲存和快取層。專案涵蓋了完整的開發生命週期，包括 **Poetry** 進行套件管理、**CI/CD** (GitHub Actions) 流程、**單元測試**，並提供 **FastAPI** 介面供終端使用者查詢資料。
+## 系統架構
 
-## 專案特色
-
-*   **分散式架構**: 透過 Airflow 實現任務排程與分散式執行。
-*   **資料來源**: 抓取台灣證券交易所的每日上市股票交易資料。
-*   **資料儲存**: 
-    *   **MySQL**: 用於持久化儲存歷史股票交易數據。
-    *   **Redis**: 作為快取層，加速 API 查詢響應速度。
-*   **API 服務**: 使用 FastAPI 建立高效能的 RESTful API，提供股票資料查詢服務。
-*   **自動化與測試**: 
-    *   **Poetry**: 現代化的 Python 套件管理工具。
-    *   **單元測試**: 確保爬蟲邏輯和資料處理的正確性。
-    *   **CI/CD**: 透過 GitHub Actions 自動化測試和部署流程。
-
-## 系統架構圖
-
-```mermaid
-graph TD
-    A[TWSE Website] --> B(Python Crawler)
-    B --> C{Data Processing}
-    C --> D[Redis Cache]
-    C --> E[MySQL Database]
-    F[Airflow Scheduler] --> B
-    G[FastAPI] --> D
-    G --> E
-    H[End User] --> G
-    I[GitHub Actions] --> J[Tests]
-    I --> K[Deployment]
-    B -- uses --> Poetry
-    G -- uses --> Poetry
+**Pipeline 流程：**
+```
+TWSE API → Airflow DAG（CeleryExecutor）→ MySQL → FastAPI → Redis Cache → Client
 ```
 
-## 環境設定
+### 架構圖
+
+```
+┌─────────────────────────────────────────────────────┐
+│                   Airflow                           │
+│  ┌──────────┐  ┌───────────┐  ┌──────────────────┐ │
+│  │Webserver │  │ Scheduler │  │  Celery Worker   │ │
+│  └──────────┘  └─────┬─────┘  └────────┬─────────┘ │
+│                      │                 │            │
+│              ┌───────▼─────────────────▼──────┐    │
+│              │     Redis（Celery Broker）       │    │
+│              └───────────────────────────────┘    │
+└─────────────────────────────────────────────────────┘
+                         │
+                         ▼
+              ┌──────────────────┐
+              │      MySQL       │
+              │  taiwan_stock    │
+              │  airflow_meta    │
+              └────────┬─────────┘
+                       │
+              ┌────────▼─────────┐     ┌─────────────┐
+              │     FastAPI      │────▶│    Redis    │
+              │  - Stock API     │◀────│   (Cache)   │
+              │  - Chart (HTML)  │     └─────────────┘
+              └────────┬─────────┘
+                       │
+              ┌────────▼─────────┐
+              │     Browser      │
+              │  (Chart.js 圖表) │
+              └──────────────────┘
+```
+
+## 主要特色
+
+**分散式架構**：Airflow CeleryExecutor + Redis broker，支援水平擴展 worker
+
+**真實資料來源**：爬取台灣證券交易所每日收盤行情，包含開高低收、成交量、成交筆數、成交金額
+
+**生產級 DAG 設計**：
+- `catchup=True` 可自動補足指定起始日期後的所有歷史資料
+- `max_active_runs=1` 避免同時打 API 被鎖 IP
+- `retries=3` + `retry_delay=5min` 應對 API 不穩定
+- 休市日自動跳過（週末、國定假日）
+
+**Upsert 邏輯**：`ON DUPLICATE KEY UPDATE`，重複爬取不會產生重複資料
+
+**Redis Cache**：FastAPI 查詢先走 Redis，cache miss 才查 MySQL，TTL 1 小時
+
+**股價走勢圖表**：內建 Chart.js 圖表，直接瀏覽器查看任何股票的開盤價與收盤價走勢
+
+**資料庫分離**：Airflow metadata（`airflow_metadata`）和業務資料（`taiwan_stock`）使用不同 DB
+
+## 元件說明
+
+| 元件 | 工具 | 用途 |
+|---|---|---|
+| 任務排程 | Apache Airflow 2.11.0 | DAG 排程、任務編排 |
+| 執行器 | CeleryExecutor | 分散式任務執行 |
+| Message Broker | Redis | Celery task queue |
+| Worker 監控 | Flower | 即時監控 worker 狀態 |
+| 資料庫 | MySQL 8.0 | 持久化儲存股票資料 |
+| 快取 | Redis | API 查詢結果快取 |
+| API | FastAPI | 股票資料查詢介面 + 走勢圖表 |
+| 視覺化 | Chart.js | 瀏覽器端股價走勢圖 |
+| DB 管理 | phpMyAdmin | 資料庫視覺化管理 |
+
+## 資料庫 Schema
+
+```sql
+CREATE TABLE stock_prices (
+    id           VARCHAR(50) PRIMARY KEY,  -- {symbol}_{date}
+    symbol       VARCHAR(20),
+    date         DATE,
+    open         FLOAT,
+    high         FLOAT,
+    low          FLOAT,
+    close        FLOAT,
+    volume       FLOAT,
+    transaction  FLOAT,
+    trade_value  FLOAT
+);
+```
+
+## 快速開始
 
 ### 前置條件
 
-在運行此專案之前，請確保您的系統已安裝以下軟體：
+- Docker + Docker Compose
+- Git
 
-*   Python 3.11+
-*   Poetry
-*   Docker 及 Docker Compose (推薦用於 Airflow, MySQL, Redis)
+### 環境變數設定
 
-### 專案安裝
+建立 `.env` 檔案：
 
-1.  **複製專案**: 
-    ```bash
-    git clone https://github.com/your-username/taiwan-stock-crawler.git
-    cd taiwan-stock-crawler
-    ```
-
-2.  **安裝 Poetry 依賴**: 
-    ```bash
-    poetry install
-    ```
-
-3.  **環境變數設定**: 
-    建立 `.env` 檔案於專案根目錄，並填入資料庫和 Redis 連線資訊：
-    ```dotenv
-    # MySQL Configuration
-    MYSQL_USER=root
-    MYSQL_PASSWORD=your_mysql_password
-    MYSQL_HOST=localhost
-    MYSQL_PORT=3306
-    MYSQL_DB=taiwan_stock
-
-    # Redis Configuration
-    REDIS_HOST=localhost
-    REDIS_PORT=6379
-    REDIS_DB=0
-    ```
-
-### 使用 Docker Compose 啟動服務 (推薦)
-
-為了方便部署 Airflow, MySQL 和 Redis，我們提供了一個 `docker-compose.yml` 檔案。請先建立此檔案：
-
-```yaml
-version: '3.8'
-services:
-  mysql:
-    image: mysql:8.0
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD}
-      MYSQL_DATABASE: ${MYSQL_DB}
-    ports:
-      - "3306:3306"
-    volumes:
-      - mysql_data:/var/lib/mysql
-
-  redis:
-    image: redis:latest
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-
-  airflow-scheduler:
-    build: .
-    command: scheduler
-    restart: always
-    environment:
-      - AIRFLOW_HOME=/opt/airflow
-      - AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags
-      - AIRFLOW__CORE__LOAD_EXAMPLES=False
-      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=mysql+pymysql://root:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DB}
-      - AIRFLOW__CELERY__BROKER_URL=redis://redis:6379/0
-      - AIRFLOW__CELERY__RESULT_BACKEND=db+mysql+pymysql://root:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DB}
-      - AIRFLOW__WEBSERVER__SECRET_KEY=super-secret
-      - MYSQL_USER=${MYSQL_USER}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
-      - MYSQL_HOST=mysql
-      - MYSQL_PORT=3306
-      - MYSQL_DB=${MYSQL_DB}
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_DB=${REDIS_DB}
-    volumes:
-      - ./dags:/opt/airflow/dags
-      - ./src:/opt/airflow/src
-      - ./tests:/opt/airflow/tests
-      - ./pyproject.toml:/opt/airflow/pyproject.toml
-      - ./poetry.lock:/opt/airflow/poetry.lock
-    depends_on:
-      - mysql
-      - redis
-
-  airflow-webserver:
-    build: .
-    command: webserver
-    restart: always
-    environment:
-      - AIRFLOW_HOME=/opt/airflow
-      - AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags
-      - AIRFLOW__CORE__LOAD_EXAMPLES=False
-      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=mysql+pymysql://root:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DB}
-      - AIRFLOW__CELERY__BROKER_URL=redis://redis:6379/0
-      - AIRFLOW__CELERY__RESULT_BACKEND=db+mysql+pymysql://root:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DB}
-      - AIRFLOW__WEBSERVER__SECRET_KEY=super-secret
-      - MYSQL_USER=${MYSQL_USER}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
-      - MYSQL_HOST=mysql
-      - MYSQL_PORT=3306
-      - MYSQL_DB=${MYSQL_DB}
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_DB=${REDIS_DB}
-    ports:
-      - "8080:8080"
-    volumes:
-      - ./dags:/opt/airflow/dags
-      - ./src:/opt/airflow/src
-      - ./tests:/opt/airflow/tests
-      - ./pyproject.toml:/opt/airflow/pyproject.toml
-      - ./poetry.lock:/opt/airflow/poetry.lock
-    depends_on:
-      - mysql
-      - redis
-
-  fastapi-app:
-    build: .
-    command: bash -c "poetry run uvicorn src.api.main:app --host 0.0.0.0 --port 8000"
-    restart: always
-    environment:
-      - MYSQL_USER=${MYSQL_USER}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
-      - MYSQL_HOST=mysql
-      - MYSQL_PORT=3306
-      - MYSQL_DB=${MYSQL_DB}
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_DB=${REDIS_DB}
-    ports:
-      - "8000:8000"
-    depends_on:
-      - mysql
-      - redis
-
-volumes:
-  mysql_data:
-  redis_data:
+```dotenv
+MYSQL_USER=root
+MYSQL_PASSWORD=your_password
+MYSQL_DB=taiwan_stock
+REDIS_DB=0
 ```
 
-同時，需要一個 `Dockerfile` 來構建 Airflow 和 FastAPI 服務的映像：
+### 設定爬蟲起始日期
 
-```dockerfile
-FROM python:3.11-slim-bookworm
+修改 `dags/stock_crawler_dag.py`，設定你想要的歷史資料起始日期：
 
-WORKDIR /opt/airflow
-
-# Install Poetry
-RUN pip install poetry
-
-# Copy project files
-COPY pyproject.toml poetry.lock ./ 
-COPY dags ./dags
-COPY src ./src
-COPY tests ./tests
-
-# Install dependencies
-RUN poetry install --no-root --no-interaction --no-dev
-
-# Airflow specific setup
-ENV AIRFLOW_HOME=/opt/airflow
-ENV PYTHONPATH=/opt/airflow:$PYTHONPATH
-
-# Initialize Airflow DB
-RUN airflow db init
-RUN airflow users create \
-    --username admin \
-    --firstname Admin \
-    --lastname User \
-    --role Admin \
-    --email admin@example.com \
-    --password admin
-
-EXPOSE 8080 8000
+```python
+start_date=datetime(2026, 1, 1),  # 改成你想要的起始日期
 ```
 
-然後執行：
+> ⚠️ DAG 設定 `catchup=True`，打開開關後 Airflow 會自動補跑從 `start_date` 到今天所有的交易日。起始日期設太早會跑很久，也可能被證交所鎖 IP，建議從近期開始。
+
+### 啟動服務
 
 ```bash
+git clone https://github.com/Brady-Huang/taiwan_stock_crawler.git
+cd taiwan_stock_crawler
+
 docker compose up -d
 ```
 
-### 手動啟動服務
+### 首次使用流程
 
-1.  **啟動 MySQL 和 Redis 服務** (請確保它們已正確安裝並運行)。
+1. 到 Airflow UI（http://localhost:8080）登入（帳號：`admin`，密碼：`admin`）
+2. 找到 `taiwan_stock_daily_crawler_prod`，把左邊的 toggle **打開**
+3. Airflow 會自動透過 catchup 補跑從 `start_date` 到今天所有錯過的交易日
+4. 等 DAG 跑完（task 變綠色）
+5. 到 API Docs（http://localhost:8000/docs）查詢股票資料，或直接看圖表
 
-2.  **運行爬蟲 (手動觸發)**: 
-    ```bash
-    poetry run python -c "from src.crawler.twse_crawler import twse_stock_crawler; from src.database.db_manager import DBManager; import datetime; df = twse_stock_crawler(datetime.date.today().strftime('%Y%m%d')); db = DBManager(); db.save_to_mysql(df)"
-    ```
+> **catchup vs backfill**
+> - **catchup**（自動）：打開 DAG toggle 後自動補跑所有錯過的 run
+> - **backfill**（手動）：自己指定時間範圍補跑，適合補特定時段的資料
 
-3.  **啟動 FastAPI 服務**: 
-    ```bash
-    poetry run uvicorn src.api.main:app --host 0.0.0.0 --port 8000
-    ```
-    API 文件將在 `http://localhost:8000/docs` 提供。
+之後每週一至五 18:00（台北時間）會自動執行。
 
-## 運行測試
+### 手動補跑歷史資料（backfill）
+
+如果需要補跑特定時間段的資料：
 
 ```bash
-poetry run pytest tests/
+docker compose exec airflow-scheduler airflow dags backfill \
+  -s 2026-01-01 \
+  -e 2026-06-30 \
+  taiwan_stock_daily_crawler_prod
 ```
 
-## CI/CD (GitHub Actions)
+> ⚠️ `-e` 是 exclusive，不包含結束日期。例如 `-e 2026-07-10` 只會跑到 7/9。
+>
+> ⚠️ `max_active_runs=1` 對 backfill 同樣有效，會一個 run 一個 run 依序執行。
 
-專案配置了 GitHub Actions，會在每次 `push` 或 `pull_request` 到 `main` 或 `master` 分支時自動執行測試和 Linting。配置檔案位於 `.github/workflows/ci.yml`。
+### Service URLs
 
-## 貢獻
+| 服務 | URL |
+|---|---|
+| FastAPI | http://localhost:8000 |
+| API Docs | http://localhost:8000/docs |
+| 股價圖表 | http://localhost:8000/chart/{symbol} |
+| Airflow UI | http://localhost:8080 |
+| Flower | http://localhost:5555 |
+| phpMyAdmin | http://localhost:8888 |
 
-歡迎任何形式的貢獻！請先提交 Issue 討論您的想法，然後提交 Pull Request。
+### 停止服務
 
-## 授權
+```bash
+docker compose down
+```
 
-此專案採用 MIT 授權條款。詳情請見 `LICENSE` 檔案。
+## API 說明
 
+### GET /stock/{symbol}
+
+查詢指定股票的歷史股價。
+
+**參數：**
+| 參數 | 類型 | 說明 |
+|---|---|---|
+| `symbol` | string | 股票代號（必填） |
+| `start_date` | date | 起始日期（選填） |
+| `end_date` | date | 結束日期（選填） |
+
+**範例：**
+```bash
+# 查詢台積電所有資料
+curl http://localhost:8000/stock/2330
+
+# 查詢指定日期範圍
+curl "http://localhost:8000/stock/2330?start_date=2026-07-01&end_date=2026-07-10"
+```
+
+**Response：**
+```json
+[
+  {
+    "symbol": "2330",
+    "date": "2026-07-08",
+    "open": 2445.0,
+    "high": 2465.0,
+    "low": 2428.0,
+    "close": 2465.0,
+    "volume": 25519000.0,
+    "transaction": 94088.0,
+    "trade_value": 62400000000.0
+  }
+]
+```
+
+### GET /chart/{symbol}
+
+瀏覽器直接查看股價走勢圖（開盤價 + 收盤價折線圖）。
+
+```
+http://localhost:8000/chart/2330   # 台積電
+http://localhost:8000/chart/2317   # 鴻海
+http://localhost:8000/chart/2454   # 聯發科
+```
+
+### GET /health
+
+```bash
+curl http://localhost:8000/health
+```
+
+## 專案結構
+
+```
+taiwan_stock_crawler/
+├── dags/
+│   └── stock_crawler_dag.py     # Airflow DAG（每日爬蟲任務）
+├── src/
+│   ├── crawler/
+│   │   └── twse_crawler.py      # TWSE 爬蟲（含 Pydantic schema 驗證）
+│   ├── database/
+│   │   └── db_manager.py        # MySQL Upsert + Redis Cache 封裝
+│   └── api/
+│       └── main.py              # FastAPI 查詢介面 + 股價圖表
+├── tests/
+│   └── test_crawler.py
+├── Dockerfile                   # Airflow 服務（基於官方 apache/airflow:2.11.0）
+├── Dockerfile.fastapi           # FastAPI 服務
+├── docker-compose.yml
+├── init.sql                     # MySQL 初始化（建立 DB、設定權限）
+├── requirements-airflow.txt     # Python 套件（Airflow 環境用）
+└── pyproject.toml               # Poetry 設定（本機開發用）
+```
+
+## 設計決策
+
+**為什麼用 CeleryExecutor？**
+台股資料有多個來源（上市、上櫃、期貨等），需要平行爬取多個 task，CeleryExecutor 支援水平擴展 worker 數量。相比 LocalExecutor 只能單機跑，CeleryExecutor 架構更接近生產環境。
+
+**為什麼 Airflow metadata 和業務 DB 分開？**
+混用同一個 DB 會讓 Airflow 的幾十張 metadata 表跟業務資料混在一起，維護困難。分開後 `taiwan_stock` DB 只有 `stock_prices` 一張表，清楚乾淨。
+
+**為什麼用 Upsert 而不是 Insert？**
+爬蟲可能因為網路問題重跑，`ON DUPLICATE KEY UPDATE` 確保重複爬取同一天的資料不會產生重複記錄。
+
+**為什麼用 Redis 做 API Cache？**
+股票歷史資料不會變動，適合 cache。TTL 設 1 小時，相同查詢第二次直接從 Redis 返回，不需要再查 MySQL。
+
+**為什麼 Redis 同時當 Celery broker 和 API cache？**
+兩者使用不同的 Redis DB（broker 用 DB 0，cache 用環境變數設定的 DB），互不干擾，省去多開一個 container 的成本。
+
+**catchup=True 的設計考量**
+設定 `catchup=True` 讓使用者可以自由指定 `start_date` 來決定要抓多久的歷史資料。搭配 `max_active_runs=1` 確保補跑時不會同時打多個 request 給證交所，避免被鎖 IP。
