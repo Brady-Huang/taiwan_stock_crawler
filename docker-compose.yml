@@ -53,9 +53,9 @@ services:
       AIRFLOW_HOME: /opt/airflow
       AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
       AIRFLOW__CORE__LOAD_EXAMPLES: "False"
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: mysql+pymysql://root:${MYSQL_PASSWORD}@mysql:3306/airflow_metadata
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: mysql+pymysql://airflow_user:${MYSQL_PASSWORD}@mysql:3306/airflow_metadata
       AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
-      AIRFLOW__CELERY__RESULT_BACKEND: db+mysql+pymysql://root:${MYSQL_PASSWORD}@mysql:3306/airflow_metadata
+      AIRFLOW__CELERY__RESULT_BACKEND: db+mysql+pymysql://airflow_user:${MYSQL_PASSWORD}@mysql:3306/airflow_metadata
       AIRFLOW__WEBSERVER__SECRET_KEY: super-secret
       AIRFLOW__CELERY__WORKER_LOG_SERVER_PORT: "8793"
       CELERY_ENABLE_UTC: "True"
