@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 default_args = {
     'owner': 'brady.huang',
     'depends_on_past': False,         # 不依賴前一次任務是否成功，失敗也能跑隔天的
-    'start_date': datetime(2026, 7, 8), # 設定補課的起始日期
+    'start_date': datetime(2026, 7, 1), # 設定補課的起始日期
     'email_on_failure': False,
     'email_on_retry': False,
     'retries': 3,                     # ⚠️ 生產級必備：失敗自動重試 3 次 (應對 API 不穩)

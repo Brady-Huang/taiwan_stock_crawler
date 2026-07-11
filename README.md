@@ -62,6 +62,8 @@ TWSE API → Airflow DAG（CeleryExecutor）→ MySQL → FastAPI → Redis Cach
 
 **資料庫分離**：Airflow metadata（`airflow_metadata`）和業務資料（`taiwan_stock`）使用不同 DB
 
+**GCP 部署**：Terraform 管理 GCP 資源，一鍵部署到 Google Cloud
+
 ## 元件說明
 
 | 元件 | 工具 | 用途 |
@@ -75,25 +77,26 @@ TWSE API → Airflow DAG（CeleryExecutor）→ MySQL → FastAPI → Redis Cach
 | API | FastAPI | 股票資料查詢介面 + 走勢圖表 |
 | 視覺化 | Chart.js | 瀏覽器端股價走勢圖 |
 | DB 管理 | phpMyAdmin | 資料庫視覺化管理 |
+| IaC | Terraform | GCP 基礎設施管理 |
 
 ## 資料庫 Schema
 
 ```sql
 CREATE TABLE stock_prices (
-    id           VARCHAR(50) PRIMARY KEY,  -- {symbol}_{date}
-    symbol       VARCHAR(20),
-    date         DATE,
-    open         FLOAT,
-    high         FLOAT,
-    low          FLOAT,
-    close        FLOAT,
-    volume       FLOAT,
-    transaction  FLOAT,
-    trade_value  FLOAT
+    id           VARCHAR(50) PRIMARY KEY,  -- Unique key: {symbol}_{date}
+    symbol       VARCHAR(20),              -- Stock ticker, e.g. 2330
+    date         DATE,                     -- Trading date
+    open         FLOAT,                    -- Opening price (TWD)
+    high         FLOAT,                    -- Highest price (TWD)
+    low          FLOAT,                    -- Lowest price (TWD)
+    close        FLOAT,                    -- Closing price (TWD)
+    volume       FLOAT,                    -- Trading volume (shares)
+    transaction  FLOAT,                    -- Number of transactions
+    trade_value  FLOAT                     -- Total trading value (TWD)
 );
 ```
 
-## 快速開始
+## 快速開始（本機）
 
 ### 前置條件
 
@@ -102,13 +105,9 @@ CREATE TABLE stock_prices (
 
 ### 環境變數設定
 
-建立 `.env` 檔案：
-
-```dotenv
-MYSQL_USER=root
-MYSQL_PASSWORD=your_password
-MYSQL_DB=taiwan_stock
-REDIS_DB=0
+```bash
+cp .env.example .env
+# 修改 .env 裡的密碼（可直接使用預設值跑 demo）
 ```
 
 ### 設定爬蟲起始日期
@@ -159,7 +158,7 @@ docker compose exec airflow-scheduler airflow dags backfill \
 >
 > ⚠️ `max_active_runs=1` 對 backfill 同樣有效，會一個 run 一個 run 依序執行。
 
-### Service URLs
+### Service URLs（本機）
 
 | 服務 | URL |
 |---|---|
@@ -174,6 +173,90 @@ docker compose exec airflow-scheduler airflow dags backfill \
 
 ```bash
 docker compose down
+```
+
+## 部署到 GCP
+
+使用 Terraform 一鍵部署到 Google Cloud Platform。
+
+### 前置條件
+
+- [Terraform](https://developer.hashicorp.com/terraform/install)
+- [gcloud CLI](https://cloud.google.com/sdk/docs/install)
+- GCP 帳號（[免費試用](https://cloud.google.com/free)）
+
+### 部署步驟
+
+```bash
+# 1. 登入 GCP
+gcloud auth application-default login
+gcloud config set project YOUR_PROJECT_ID
+
+# 2. 開啟需要的 API
+gcloud services enable compute.googleapis.com storage.googleapis.com
+
+# 3. 建立 Service Account
+gcloud iam service-accounts create terraform-sa \
+  --display-name "Terraform Service Account"
+
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+  --member "serviceAccount:terraform-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+  --role "roles/editor"
+
+gcloud iam service-accounts keys create ~/terraform-key.json \
+  --iam-account terraform-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com
+
+# 4. 設定憑證
+export GOOGLE_APPLICATION_CREDENTIALS=~/terraform-key.json
+
+# 5. 部署
+cd terraform
+terraform init
+terraform apply
+```
+
+### Terraform 建立的資源
+
+| 資源 | 說明 |
+|---|---|
+| VPC + Subnet | 獨立的網路環境 |
+| Firewall | 開放 8000、8080、5555、8888 port |
+| Static IP | 固定的公開 IP |
+| GCE VM（e2-standard-4） | 跑 docker-compose 的虛擬機 |
+
+VM 啟動後會自動 clone repo 並執行 `docker-compose up -d`，約 5-10 分鐘後服務就緒。
+
+### 修改部署設定
+
+編輯 `terraform/variables.tf`：
+
+```hcl
+variable "project_id" {
+  default = "your-gcp-project-id"  # 改成你的 Project ID
+}
+
+variable "region" {
+  default = "asia-east1"  # 台灣最近的 region
+}
+
+variable "machine_type" {
+  default = "e2-standard-4"  # 可依需求調整
+}
+```
+
+### 關閉 VM（節省費用）
+
+```bash
+gcloud compute instances stop taiwan-stock-vm --zone asia-east1-b
+
+# 需要時再開啟
+gcloud compute instances start taiwan-stock-vm --zone asia-east1-b
+```
+
+### 刪除所有資源
+
+```bash
+terraform destroy
 ```
 
 ## API 說明
@@ -246,12 +329,20 @@ taiwan_stock_crawler/
 │       └── main.py              # FastAPI 查詢介面 + 股價圖表
 ├── tests/
 │   └── test_crawler.py
+├── terraform/
+│   ├── main.tf                  # GCP 資源（VPC、VM、Firewall、Static IP）
+│   ├── variables.tf             # 變數設定（project_id、region 等）
+│   ├── outputs.tf               # 輸出（VM IP、API URL）
+│   └── startup.sh               # VM 啟動腳本
 ├── Dockerfile                   # Airflow 服務（基於官方 apache/airflow:2.11.0）
 ├── Dockerfile.fastapi           # FastAPI 服務
 ├── docker-compose.yml
 ├── init.sql                     # MySQL 初始化（建立 DB、設定權限）
+├── .env.example                 # 環境變數範本
 ├── requirements-airflow.txt     # Python 套件（Airflow 環境用）
-└── pyproject.toml               # Poetry 設定（本機開發用）
+└── .github/
+    └── workflows/
+        └── ci.yml               # GitHub Actions CI（pytest）
 ```
 
 ## 設計決策
@@ -273,3 +364,6 @@ taiwan_stock_crawler/
 
 **catchup=True 的設計考量**
 設定 `catchup=True` 讓使用者可以自由指定 `start_date` 來決定要抓多久的歷史資料。搭配 `max_active_runs=1` 確保補跑時不會同時打多個 request 給證交所，避免被鎖 IP。
+
+**為什麼用 Terraform 而不是直接 SSH 部署？**
+Terraform 把基礎設施定義成 code，版本控制、可重現、一鍵部署。相比手動 SSH 設定，Terraform 讓任何人 clone repo 後都能用同樣的指令部署到自己的 GCP 帳號。
