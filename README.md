@@ -62,7 +62,7 @@ TWSE API → Airflow DAG（CeleryExecutor）→ MySQL → FastAPI → Redis Cach
 
 **資料庫分離**：Airflow metadata（`airflow_metadata`）和業務資料（`taiwan_stock`）使用不同 DB
 
-**GCP 部署**：Terraform 管理 GCP 資源，一鍵部署到 Google Cloud
+**GCP 部署**：Terraform 管理 GCP 資源，Secret Manager 管理敏感資訊，一鍵部署到 Google Cloud
 
 ## 元件說明
 
@@ -78,6 +78,7 @@ TWSE API → Airflow DAG（CeleryExecutor）→ MySQL → FastAPI → Redis Cach
 | 視覺化 | Chart.js | 瀏覽器端股價走勢圖 |
 | DB 管理 | phpMyAdmin | 資料庫視覺化管理 |
 | IaC | Terraform | GCP 基礎設施管理 |
+| 密碼管理 | GCP Secret Manager | 安全儲存敏感資訊 |
 
 ## 資料庫 Schema
 
@@ -177,7 +178,7 @@ docker compose down
 
 ## 部署到 GCP
 
-使用 Terraform 一鍵部署到 Google Cloud Platform。
+使用 Terraform 一鍵部署到 Google Cloud Platform，密碼透過 GCP Secret Manager 安全管理。
 
 ### 前置條件
 
@@ -187,15 +188,28 @@ docker compose down
 
 ### 部署步驟
 
+**1. 登入 GCP 並設定 Project**
+
 ```bash
-# 1. 登入 GCP
 gcloud auth application-default login
 gcloud config set project YOUR_PROJECT_ID
+```
 
-# 2. 開啟需要的 API
-gcloud services enable compute.googleapis.com storage.googleapis.com
+**2. 開啟需要的 API**
 
-# 3. 建立 Service Account
+```bash
+gcloud services enable \
+  compute.googleapis.com \
+  storage.googleapis.com \
+  secretmanager.googleapis.com \
+  iam.googleapis.com \
+  cloudresourcemanager.googleapis.com \
+  --project YOUR_PROJECT_ID
+```
+
+**3. 建立 Terraform Service Account**
+
+```bash
 gcloud iam service-accounts create terraform-sa \
   --display-name "Terraform Service Account"
 
@@ -203,13 +217,40 @@ gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
   --member "serviceAccount:terraform-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
   --role "roles/editor"
 
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+  --member "serviceAccount:terraform-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+  --role "roles/resourcemanager.projectIamAdmin"
+
 gcloud iam service-accounts keys create ~/terraform-key.json \
   --iam-account terraform-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com
+```
 
-# 4. 設定憑證
+**4. 建立 Secret Manager secrets**
+
+```bash
+echo -n "your_mysql_password" | gcloud secrets create mysql-password --data-file=- --project YOUR_PROJECT_ID
+echo -n "your_mysql_root_password" | gcloud secrets create mysql-root-password --data-file=- --project YOUR_PROJECT_ID
+
+# 產生 Fernet Key
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+echo -n "your_fernet_key" | gcloud secrets create airflow-fernet-key --data-file=- --project YOUR_PROJECT_ID
+echo -n "your_secret_key" | gcloud secrets create airflow-secret-key --data-file=- --project YOUR_PROJECT_ID
+```
+
+**5. 修改 Terraform 設定**
+
+編輯 `terraform/variables.tf`：
+
+```hcl
+variable "project_id" {
+  default = "your-gcp-project-id"
+}
+```
+
+**6. 部署**
+
+```bash
 export GOOGLE_APPLICATION_CREDENTIALS=~/terraform-key.json
-
-# 5. 部署
 cd terraform
 terraform init
 terraform apply
@@ -223,26 +264,10 @@ terraform apply
 | Firewall | 開放 8000、8080、5555、8888 port |
 | Static IP | 固定的公開 IP |
 | GCE VM（e2-standard-4） | 跑 docker-compose 的虛擬機 |
+| Service Account | VM 用來讀取 Secret Manager 的身份 |
+| IAM Binding | 授予 VM Secret Manager 讀取權限 |
 
-VM 啟動後會自動 clone repo 並執行 `docker-compose up -d`，約 5-10 分鐘後服務就緒。
-
-### 修改部署設定
-
-編輯 `terraform/variables.tf`：
-
-```hcl
-variable "project_id" {
-  default = "your-gcp-project-id"  # 改成你的 Project ID
-}
-
-variable "region" {
-  default = "asia-east1"  # 台灣最近的 region
-}
-
-variable "machine_type" {
-  default = "e2-standard-4"  # 可依需求調整
-}
-```
+VM 啟動後會自動從 Secret Manager 讀取密碼、clone repo 並執行 `docker-compose up -d`，約 5-10 分鐘後服務就緒。
 
 ### 關閉 VM（節省費用）
 
@@ -330,10 +355,10 @@ taiwan_stock_crawler/
 ├── tests/
 │   └── test_crawler.py
 ├── terraform/
-│   ├── main.tf                  # GCP 資源（VPC、VM、Firewall、Static IP）
+│   ├── main.tf                  # GCP 資源（VPC、VM、Firewall、Static IP、Service Account）
 │   ├── variables.tf             # 變數設定（project_id、region 等）
 │   ├── outputs.tf               # 輸出（VM IP、API URL）
-│   └── startup.sh               # VM 啟動腳本
+│   └── startup.sh               # VM 啟動腳本（從 Secret Manager 讀取密碼）
 ├── Dockerfile                   # Airflow 服務（基於官方 apache/airflow:2.11.0）
 ├── Dockerfile.fastapi           # FastAPI 服務
 ├── docker-compose.yml
@@ -367,3 +392,6 @@ taiwan_stock_crawler/
 
 **為什麼用 Terraform 而不是直接 SSH 部署？**
 Terraform 把基礎設施定義成 code，版本控制、可重現、一鍵部署。相比手動 SSH 設定，Terraform 讓任何人 clone repo 後都能用同樣的指令部署到自己的 GCP 帳號。
+
+**為什麼用 GCP Secret Manager？**
+密碼不應該寫在 GitHub 上，即使是 demo 專案。Secret Manager 讓 VM 在啟動時安全地讀取密碼，GitHub 上的 code 完全不含任何敏感資訊。
