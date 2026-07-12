@@ -65,4 +65,19 @@ resource "google_compute_instance" "vm" {
   })
 
   tags = ["taiwan-stock"]
+  service_account {
+  email  = google_service_account.vm_sa.email
+  scopes = ["cloud-platform"]
+}
+}
+
+resource "google_service_account" "vm_sa" {
+  account_id   = "taiwan-stock-vm-sa"
+  display_name = "Taiwan Stock VM Service Account"
+}
+
+resource "google_project_iam_member" "secret_accessor" {
+  project = var.project_id
+  role    = "roles/secretmanager.secretAccessor"
+  member  = "serviceAccount:${google_service_account.vm_sa.email}"
 }
